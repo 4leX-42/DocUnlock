@@ -4,8 +4,8 @@ Fecha: 2026-10-21
 
 Este documento explica **qué es** la herramienta, **cómo** está construida, **qué
 está probado** y **qué falta** por hacer. El código vive en la carpeta
-`DocUnlock/` dentro de `Testeo2.0`. La construcción quedó pausada a petición del
-usuario; se retoma más adelante.
+`Azure_MS_entorno\DocUnlock\`. Proyecto **terminado** el 2026-10-21: limpieza,
+modo compresión, GUI y `.exe` portable probados.
 
 ---
 
@@ -58,9 +58,12 @@ DocUnlock/
     base.py                   Contrato abstracto Processor
     pdf_proc.py               PDF (pikepdf)
     office_proc.py            docx/xlsx/pptx + descifrado OLE (msoffcrypto)
+    compress.py               Modo compresión (pikepdf + Pillow para PDF, Pillow para Office)
+    pdf_fonts.py              Recorte de fuentes TrueType incrustadas (fontTools)
   gui/app.py                  Interfaz PySide6 con hilo de trabajo (QThread)
+  tests/test_pipeline.py      Banco de pruebas con ficheros sintéticos
   requirements.txt
-  build.bat                   Compila el .exe
+  build.bat                   Compila el .exe (solo librerías Python)
   README.md
   docs/ESTADO-Y-PENDIENTE.md  Este documento
 ```
@@ -94,83 +97,156 @@ Por los primeros bytes (magic bytes), no por la extensión:
   moderno.
 
 ---
+### Modo compresión (hecho 2026-10-21)
+
+Es una **casilla que se combina con la limpieza** ("Compress" + perfil en la
+GUI, `-c <perfil>` en CLI): primero se limpia, después se comprime la copia
+limpia. El fichero comprimido solo sustituye al limpio si pesa menos.
+
+| Perfil | PDF (resolución, calidad JPEG) | Imágenes Office (lado máx., calidad JPEG) |
+|--------|--------------------------------|-------------------------------------------|
+| `screen` | 72 ppp, 50 | 1280 px, 60 |
+| `ebook` (por defecto) | 150 ppp, 60 | 1920 px, 75 |
+| `printer` | 300 ppp, 80 | 3000 px, 85 |
+
+- **PDF** (2026-10-22, sustituye a Ghostscript; motivo: AGPL y fallos de
+  seguridad graves con explotación real, CVE-2024-29510, en un binario
+  congelado dentro del `.exe` que nadie parchea, lo que no pasaría el control
+  A.8.8 de ISO 27001). Todo dentro del proceso con pikepdf, Pillow y fontTools:
+  - Mide a qué tamaño se **dibuja** cada imagen (contenido de página y Form
+    XObjects, siguiendo `q/Q/cm`) y baja las que superen 1,5 × la resolución
+    del perfil, como hace Ghostscript. Fotos y escaneos a JPEG; dibujos de
+    256 colores o menos, sin pérdida. Se saltan máscaras, CMYK, 1 bit y
+    JBIG2/CCITT/JPX.
+  - Imagen Flate **dañada**: se rescata lo legible y el resto queda en blanco,
+    como lo pintan los visores (la *Guía LinkedIn* tenía una de 13 MB).
+  - **Fuentes** (`pdf_fonts.py`): Word incrusta TrueType enteras aunque las
+    marque como subconjunto (`ABCDEE+Calibri`, ~200 KB). Se recortan con
+    fontTools conservando los ids de glifo: TrueType simples, todo lo que
+    alcanzan los 256 códigos; Type0 Identity, los glifos usados. Las fuentes
+    del `/DR` de formularios no se tocan.
+  - Imágenes idénticas repetidas se unen en un solo objeto.
+  - Guarda con streams recomprimidos y object streams. No añade `Producer` ni
+    XMP, así que no hace falta volver a borrar metadatos.
+- **Office**: se recomprimen los JPEG/PNG de `word|xl|ppt/media/` con Pillow,
+  mismo nombre y formato (no se tocan content types ni relaciones). EMF/WMF y
+  otros formatos se dejan como están.
+- La tabla muestra **tamaño antes → después (%)** por archivo.
+- **Comparativa con Ghostscript 10.05.1** (2026-10-22, 9 PDF reales del equipo
+  más un escaneo sintético, 46,5 MB en total; calidad = PSNR mínimo de todas
+  las páginas a 72 ppp frente al original):
+
+  | Perfil | Ghostscript | pikepdf | Tiempo GS / pikepdf |
+  |--------|-------------|---------|---------------------|
+  | `screen` | 9,5 MB | 9,5 MB | 9,0 s / 6,2 s |
+  | `ebook` | 11,9 MB | 11,4 MB | 8,7 s / 6,4 s |
+  | `printer` | 19,5 MB | 15,7 MB | 9,5 s / 7,2 s |
+
+  Mismo peso o menos y más rápido, con mejor PSNR en casi todos (el texto y
+  los vectores no se rasterizan ni se reescriben). Ghostscript gana algo en
+  PDF de texto puro (Alcampo: 176 frente a 229 KB).
+
+---
 
 ## 3. Qué está probado (2026-10-21)
 
-Verificado headless por CLI (misma lógica que usa la GUI):
+- **Factura real firmada** (`14209724-FACTURA CCAA...pdf`, iText 7.1.5): sin
+  cifrado, `SigFlags 0`, sin `/Perms`, 2 firmas quitadas, metadatos borrados,
+  sin widgets huérfanos.
+- **Banco de pruebas** `tests/test_pipeline.py` (8 casos, todos OK; genera los
+  ficheros al vuelo, sin documentos reales en el repo):
+  - docx protegido: protección y metadatos fuera, contenido intacto, original sin tocar.
+  - **docx cifrado real** (cifrado con msoffcrypto): sin contraseña →
+    `NEEDS_PASSWORD`; contraseña mala → `NEEDS_PASSWORD` "Contrasena incorrecta"
+    (antes daba `ERROR`: msoffcrypto falla en `decrypt()`, no en `load_key()` —
+    corregido); contraseña buena → descifrado y limpio, sin temporales.
+  - **PDF con contraseña de apertura real**: sin contraseña → `NEEDS_PASSWORD` y
+    no deja nada a medias; con ella → descifrado y sin metadatos.
+  - PDF con permisos de propietario: sale sin cifrado.
+  - Compresión PDF (2 páginas A4 a 300 ppp): ≥40 % menos, mismas páginas, sin
+    `/Info` ni XMP. Compresión docx: imagen a ≤1920 px, sigue siendo JPEG.
+  - Lote con `a\factura.docx` y `b\factura.docx` y salida **dentro** de la
+    carpeta de entrada: respeta subcarpetas y la segunda pasada no reprocesa su
+    propia salida.
+- **GUI** conducida de punta a punta (Qt offscreen): añadir carpeta, Compress,
+  Process, fila con tamaño y detalle, botón "Open output" habilitado.
+- **`.exe` real** (`dist\DocUnlock.exe`, recompilado 2026-10-22 sin
+  Ghostscript: 71 MB, antes 87): en modo CLI procesó 11 PDF con `-c ebook`,
+  45,4 MB a 11 MB, y marcó como error el PDF dañado de prueba.
+- **Cancelar** a mitad de lote (2 de 11 hechos, 9 marcados *Cancelado*) y
+  **doble clic** en fila (abre la copia; en error muestra el detalle).
 
-- **Factura real firmada** (`14209724-FACTURA CCAA...pdf`, iText 7.1.5): salida
-  sin cifrado, `SigFlags 0`, sin `/Perms`, 2 firmas quitadas, metadatos
-  borrados, sin widgets huérfanos. Queda editable sin el truco de "Imprimir →
-  Guardar como PDF".
-- **docx sintético protegido**: protección de edición fuera, metadatos borrados,
-  contenido intacto, ZIP válido.
-- `py_compile` OK en todos los módulos (incluida la GUI).
-
-El venv de pruebas tiene solo `pikepdf` + `msoffcrypto-tool`. `PySide6` y
-`PyInstaller` aún no se instalaron; los instala `build.bat` al compilar.
-
----
-
-## 4. Qué falta
-
-### 4.1. Modo de compresión / reducir tamaño (PEDIDO — pendiente)
-
-Incorporar a la misma herramienta un modo para **reducir el peso** de ficheros
-manteniendo legibilidad, igual que se hizo con el PDF "Anexo 7. Preacuerdos con
-puntos de retorno".
-
-**Referencia de aquel trabajo (2026-10-21):** el peso estaba en páginas
-escaneadas a ~300 ppp. Se usó **Ghostscript** para rebajarlas:
-
-- Binario: `C:\Program Files\gs\gs10.08.0\bin\gswin64c.exe`.
-- Dispositivo: `pdfwrite`, `-dCompatibilityLevel=1.6`.
-- Perfiles comparados: `-dPDFSETTINGS=/ebook` (≈150 ppp, el elegido) frente a
-  `/printer` (≈300 ppp).
-- Resultado: 29,7 MB de origen bajaron notablemente con `/ebook`, revisando la
-  legibilidad página a página antes de dar por buena la compresión.
-
-**Diseño propuesto para el modo** (a implementar, no hecho):
-
-- Nuevo `Processor` de compresión (p. ej. `processors/compress_proc.py`) o una
-  opción "Compress" seleccionable en la GUI junto a "Clean/Unlock".
-- PDF: envolver Ghostscript con elección de perfil (`screen`/`ebook`/`printer`)
-  y nivel de calidad configurable. Detectar la ruta de `gswin64c.exe` y avisar
-  si no está instalado.
-- Decidir si la compresión es un modo aparte o una casilla que se combina con la
-  limpieza (p. ej. "limpiar y además comprimir").
-- Posible extensión a imágenes dentro de Office (recompresión de medios en el
-  ZIP) como fase posterior.
-- Mostrar en la tabla el tamaño antes/después por archivo.
-
-**Dependencia nueva:** Ghostscript (externo, no pip). Documentar su instalación
-o empaquetar su localización.
-
-### 4.2. Otros pendientes
-
-- Compilar y probar el `.exe` real (`build.bat`) en la VM Intune-Lab.
-- Probar la GUI de forma interactiva (hasta ahora solo lógica por CLI).
-- Probar con un Office **cifrado real** (ruta `msoffcrypto`), no solo docx
-  sintético.
-- Probar un PDF con contraseña de apertura real (ruta `NEEDS_PASSWORD` +
-  descifrado con contraseña correcta).
-- Decidir carpeta de salida por defecto y comportamiento ante nombres
-  repetidos (ya hay `_unique_dst`, revisar que convence).
+Ejecutar las pruebas: `.venv\Scripts\python -m unittest -v tests.test_pipeline`.
 
 ---
 
-## 5. Cómo retomar
+## 4. Requisito: cualquier Windows 11 sin permisos de administrador
+
+Cumplido por diseño:
+
+- `DocUnlock.exe` es portable: no se instala, no escribe en el registro ni en
+  `Program Files`. PyInstaller lo descomprime en `%TEMP%\_MEI…` en cada arranque
+  y lo borra al cerrar.
+- Python, Qt, pikepdf, msoffcrypto, Pillow y fontTools van **dentro** del
+  `.exe`. El equipo destino no necesita nada instalado.
+- Compilar tampoco pide admin (`build.bat` usa un venv local).
+
+Lo que puede estorbar en un equipo concreto (no depende del programa):
+
+1. **SmartScreen**: un `.exe` sin firmar descargado de Internet/Teams/correo
+   muestra "Windows protegió su PC". Se pasa con *Más información → Ejecutar
+   de todas formas*, sin admin. Copiado por USB o carpeta de red no suele salir.
+2. **Equipos gestionados (Intune)**: si hay AppLocker/WDAC o la regla ASR
+   *"Bloquear ejecutables que no cumplan criterios de prevalencia, antigüedad o
+   lista de confianza"*, el `.exe` se bloquea. Solución: firmar el
+   `.exe` con un certificado de firma de código o que IT lo permita por hash.
+3. **Antivirus**: los `.exe` de PyInstaller *onefile* a veces dan falso
+   positivo heurístico. Mismo remedio: firma o exclusión.
+4. **Licencias** (inventario ISO): pikepdf MPL-2.0, qpdf Apache-2.0, Pillow
+   MIT-CMU, fontTools MIT, msoffcrypto-tool MIT, PySide6 LGPL-3.0. Ninguna
+   obliga a publicar el código por uso interno. Versiones fijadas en
+   `requirements.txt`: al salir un parche de seguridad, subir versión y
+   recompilar.
+
+---
+
+## 5. Cómo retomar o recompilar
 
 ```bat
-cd C:\Users\alexa\Documents\Testeo2.0\DocUnlock
-py -3 -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python main.py            REM GUI
-
-REM compilar:
-build.bat                 REM -> dist\DocUnlock.exe
+cd C:\Users\alexa\Documents\Testeo2.0\Azure_MS_entorno\DocUnlock
+build.bat                 REM crea .venv si falta -> dist\DocUnlock.exe
+.venv\Scripts\python main.py                  REM GUI desde código
+.venv\Scripts\python main.py C:\docs -c ebook REM CLI, limpiar y comprimir
 ```
 
-Añadir un formato o un modo nuevo = un `Processor` en `processors/` registrado
-en `Pipeline` (`core/pipeline.py`).
+Añadir un formato = un `Processor` en `processors/` registrado en `Pipeline`
+(`core/pipeline.py`). Mejoras opcionales, no pedidas: firmar el `.exe`, adelgazar
+el empaquetado (Qt Quick/QML/Pdf se cuelan por los plugins de Qt, ~15 MB).
+
+---
+
+## 6. Interfaz (rehecha 2026-10-21)
+
+La primera GUI (Qt por defecto, en inglés) se descartó. La actual:
+
+- **Toda en castellano**, negro, blanco y rojo corporativo (`#E30613`), con
+  Bahnschrift (viene con Windows). Tokens en `gui/theme.py`; formas con
+  esquinas cortadas pintadas a mano en `gui/widgets.py`. El rojo solo marca lo
+  activo: interruptor encendido, perfil elegido, botón Procesar, zona de
+  arrastre bajo el cursor y errores. Barra de título negra en Windows 11.
+- **Dos bloques independientes**:
+  - *Limpiar*: metadatos, firmas digitales, protección de edición y
+    contraseñas/permisos, cada uno con su interruptor (`core/options.py`).
+  - *Comprimir*: reducir tamaño con perfil Máxima / Equilibrada / Ligera.
+    Se puede usar sin limpiar nada.
+- Con *Contraseñas y permisos* apagado la copia sigue protegida: el PDF se
+  guarda con su cifrado original y el Office se vuelve a cifrar con la misma
+  contraseña después de comprimir. Un PDF cuyo cifrado se conserva también se
+  comprime y sale con el mismo cifrado (desde 2026-10-22).
+- Cola visible al soltar archivos, barra de progreso real (n de N), resumen
+  final con el ahorro total y aviso de los que piden contraseña.
+- Icono propio (`assets/docunlock.ico`), también en el `.exe`.
+
+Pruebas: 13 casos OK, incluidos conservar contraseña en PDF y en docx,
+comprimir sin limpiar, recorte de fuente TrueType entera y PDF cifrado
+comprimido con imágenes repetidas unidas.

@@ -7,6 +7,8 @@ touching content. Metadata lives in docProps/core.xml and docProps/app.xml.
 A file that is a CFB/OLE container ('ole' kind) is either legacy binary
 Office or an OOXML file wrapped in password encryption. We decrypt it with
 the supplied password via msoffcrypto, then clean the recovered OOXML.
+With options.passwords off, the pipeline encrypts the result again with the
+same password once every other step (compression included) is done.
 """
 from __future__ import annotations
 
@@ -36,18 +38,31 @@ _META_PARTS = ("docProps/core.xml", "docProps/app.xml", "docProps/custom.xml")
 class OfficeProcessor(Processor):
     kinds = ("docx", "xlsx", "pptx", "ole")
 
-    def process(self, src, dst, result, password):
+    def process(self, src, dst, result, password, options):
         source = src
         tmp: Path | None = None
 
         if result.kind == "ole":
             decrypted = self._decrypt_ole(src, dst, result, password)
             if decrypted is None:
-                return  # status already set (NEEDS_PASSWORD / ERROR)
+                return  # status already set (NEEDS_PASSWORD / SKIPPED / ERROR)
             source, tmp = decrypted, decrypted
+            if options.passwords:
+                result.add("contraseña quitada")
+            else:
+                result.relock = password
+            if not zipfile.is_zipfile(decrypted):
+                # Encrypted legacy binary .doc/.xls/.ppt: hand back the
+                # decrypted file; its protection flags are not OOXML parts.
+                decrypted.replace(dst)
+                result.relock = None  # msoffcrypto cannot re-encrypt these
+                result.add("binario antiguo: solo descifrado")
+                result.output = dst
+                result.status = Status.OK
+                return
 
         try:
-            self._clean_ooxml(source, dst, result)
+            self._clean_ooxml(source, dst, result, options)
         finally:
             if tmp is not None and tmp.exists():
                 tmp.unlink()
@@ -55,7 +70,20 @@ class OfficeProcessor(Processor):
         result.output = dst
         result.status = Status.OK
         if not result.actions:
-            result.add("sin protecciones detectadas")
+            result.add("nada que quitar")
+
+    @staticmethod
+    def encrypt(path: Path, password: str) -> None:
+        """Encrypt an OOXML file in place with `password` (ECMA-376 agile)."""
+        from msoffcrypto.format.ooxml import OOXMLFile
+
+        tmp = path.with_suffix(path.suffix + ".enc.tmp")
+        try:
+            with path.open("rb") as fin, tmp.open("wb") as fout:
+                OOXMLFile(fin).encrypt(password, fout)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     # -- OLE / encrypted ---------------------------------------------------
     def _decrypt_ole(self, src, dst, result, password) -> Path | None:
@@ -63,7 +91,7 @@ class OfficeProcessor(Processor):
             import msoffcrypto
         except ImportError:
             result.status = Status.ERROR
-            result.message = "Falta msoffcrypto-tool para archivos cifrados."
+            result.message = "Falta msoffcrypto-tool (cifrado)"
             return None
 
         with src.open("rb") as fh:
@@ -71,31 +99,30 @@ class OfficeProcessor(Processor):
             if not office.is_encrypted():
                 # CFB but not encrypted: legacy binary .doc/.xls, not OOXML.
                 result.status = Status.SKIPPED
-                result.message = (
-                    "Formato binario antiguo (.doc/.xls) sin cifrar. "
-                    "Conviertelo a formato moderno para procesarlo."
-                )
+                result.message = "Binario antiguo sin cifrar: convertir a .docx/.xlsx/.pptx"
                 return None
             if not password:
                 result.status = Status.NEEDS_PASSWORD
-                result.message = "Office cifrado. Indica la contrasena."
+                result.message = "Cifrado: falta contraseña de apertura"
                 return None
-            try:
-                office.load_key(password=password)
-            except Exception:
-                result.status = Status.NEEDS_PASSWORD
-                result.message = "Contrasena incorrecta."
-                return None
-
+            # A wrong password may pass load_key and only fail in decrypt(),
+            # so both steps count as "wrong password", and the temp goes.
             tmp = dst.with_suffix(dst.suffix + ".dec.tmp")
-            with tmp.open("wb") as out:
-                office.decrypt(out)
+            try:
+                office.load_key(password=password, verify_password=True)
+                with tmp.open("wb") as out:
+                    office.decrypt(out)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                result.status = Status.NEEDS_PASSWORD
+                result.message = "Contraseña incorrecta"
+                return None
 
         result.add("descifrado")
         return tmp
 
     # -- OOXML -------------------------------------------------------------
-    def _clean_ooxml(self, src: Path, dst: Path, result: FileResult) -> None:
+    def _clean_ooxml(self, src: Path, dst: Path, result: FileResult, options) -> None:
         protection_hits = 0
         meta_hits = 0
         buffer = io.BytesIO()
@@ -106,9 +133,10 @@ class OfficeProcessor(Processor):
                     data = zin.read(item.filename)
 
                     if item.filename in _META_PARTS:
-                        data, changed = self._blank_metadata(item.filename, data)
-                        meta_hits += changed
-                    else:
+                        if options.metadata:
+                            data, changed = self._blank_metadata(item.filename, data)
+                            meta_hits += changed
+                    elif options.protection:
                         data, n = self._strip_protection(data)
                         protection_hits += n
 
@@ -118,7 +146,7 @@ class OfficeProcessor(Processor):
             out.write(buffer.getvalue())
 
         if protection_hits:
-            result.add(f"proteccion de edicion quitada ({protection_hits})")
+            result.add(f"protección quitada ({protection_hits})")
         if meta_hits:
             result.add("metadatos borrados")
 

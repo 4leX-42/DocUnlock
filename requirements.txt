@@ -1,3 +1,7 @@
-PySide6>=6.6
-pikepdf>=8.0
-msoffcrypto-tool>=5.1
+# Versions pinned for the ISO 27001 software inventory; bump deliberately
+# and rebuild the .exe when one of them publishes a security fix.
+PySide6==6.12.0
+pikepdf==10.17.0
+msoffcrypto-tool==6.0.0
+pillow==13.0.0
+fonttools==4.67.0
