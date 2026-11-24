@@ -10,7 +10,7 @@ Instalar: $f="$env:TEMP\DocUnlock.exe"; [Net.ServicePointManager]::SecurityProto
 
 Limpieza y compresión local de PDF y Office. Sin admin, sin red.
 
-![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-1f1f1f?style=flat-square) ![Python](https://img.shields.io/badge/Python-PySide6-1f1f1f?style=flat-square&logo=python&logoColor=white) ![Local](https://img.shields.io/badge/100%25-local-c8102e?style=flat-square)
+![Windows 11](https://img.shields.io/badge/Windows-11-1f1f1f?style=flat-square) ![Python](https://img.shields.io/badge/Python-PySide6-1f1f1f?style=flat-square&logo=python&logoColor=white) ![Local](https://img.shields.io/badge/100%25-local-c8102e?style=flat-square)
 
 <img src="assets/screenshot.png" width="760" alt="DocUnlock">
 
