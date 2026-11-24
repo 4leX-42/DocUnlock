@@ -6,6 +6,8 @@ Instalar: $f="$env:TEMP\DocUnlock.exe"; [Net.ServicePointManager]::SecurityProto
 -->
 # DocUnlock
 
+<p align="center"><img src="assets/screenshot.png" width="760" alt="DocUnlock"></p>
+
 Herramienta local para limpiar documentos propios: quita restricciones de
 edición, permisos, firmas digitales y metadatos de PDF y Office, por archivo
 o por lotes. Todo el procesamiento es local; nada se sube a ningún servicio.
